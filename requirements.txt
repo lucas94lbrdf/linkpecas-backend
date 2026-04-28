@@ -14,3 +14,4 @@ celery
 python-multipart
 email-validator
 stripe
+prometheus-fastapi-instrumentator

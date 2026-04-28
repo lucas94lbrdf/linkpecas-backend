@@ -20,11 +20,15 @@ from app.routes.api.categories import router as categories_router
 from app.routes.api.vehicles import router as vehicles_router
 from app.routes.api.payments import router as payments_router
 from app.routes.api.enthusiast import router as enthusiast_router
+from prometheus_fastapi_instrumentator import Instrumentator
 
 app = FastAPI(
     title="Auto Marketplace API",
     version="1.0.0"
 )
+
+# Monitoramento do Prometheus
+Instrumentator().instrument(app).expose(app)
 
 # Configuração de CORS
 app.add_middleware(
@@ -59,3 +63,4 @@ app.include_router(enthusiast_router, prefix="/api/enthusiast", tags=["Enthusias
 @app.get("/")
 def health():
     return {"status": "ok"}
+

@@ -745,6 +745,6 @@ def update_setting(key: str, data: UpdateSettingSchema, db: Session = Depends(ge
             setting.value = encrypt(data.value)
     else:
         setting.value = data.value
-        
+         
     db.commit()
     return {"message": "Configuração atualizada com sucesso", "key": key}

@@ -447,3 +447,4 @@ def get_tracking_ids(db: Session = Depends(get_db)):
     settings = db.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
 
     return {s.key: s.value for s in settings}
+ 

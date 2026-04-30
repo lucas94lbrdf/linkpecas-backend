@@ -20,7 +20,7 @@ def create_admin():
 
         new_admin = User(
             name="Administrador Master",
-            email="admin@automarket.com",
+            email="admin@linkpecas.com",
             password_hash=hash_password("admin123"),
             role="admin",
             status="active",

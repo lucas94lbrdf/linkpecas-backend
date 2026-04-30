@@ -9,6 +9,8 @@ from app.models.vehicle import Manufacturer, VehicleModel, VehicleYear
 from app.models.community import Community
 from app.models.marketplace import Marketplace
 from app.models.search_log import SearchLog
+from app.models.setting import SystemSetting
+
 
 __all__ = [
     "Ad",
@@ -24,4 +26,5 @@ __all__ = [
     "Community",
     "Marketplace",
     "SearchLog",
+    "SystemSetting",
 ]

@@ -11,7 +11,10 @@ from passlib.context import CryptContext
 
 from app.db.session import SessionLocal
 from app.models.user import User
+from app.models.setting import SystemSetting
 from app.utils.activity import log_activity
+from app.utils.encryption import decrypt
+import requests
 
 # ==========================================================
 # CONFIG
@@ -49,6 +52,7 @@ class RegisterSchema(BaseModel):
 class LoginSchema(BaseModel):
     email: EmailStr
     password: str
+    recaptcha_token: Optional[str] = None
 
 class RefreshSchema(BaseModel):
     refresh_token: str
@@ -181,6 +185,25 @@ async def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_
 
 @router.post("/login")
 async def login(request: Request, data: LoginSchema, db: Session = Depends(get_db)):
+    # Validação reCAPTCHA
+    recaptcha_setting = db.query(SystemSetting).filter(SystemSetting.key == "recaptcha_secret_key").first()
+    recaptcha_secret = decrypt(recaptcha_setting.value) if recaptcha_setting and recaptcha_setting.value else None
+    
+    if recaptcha_secret:
+        if not data.recaptcha_token:
+            raise HTTPException(400, "Validação de segurança (reCAPTCHA) obrigatória")
+        
+        response = requests.post(
+            "https://www.google.com/recaptcha/api/siteverify",
+            data={
+                "secret": recaptcha_secret,
+                "response": data.recaptcha_token
+            }
+        )
+        result = response.json()
+        if not result.get("success"):
+            raise HTTPException(400, "Falha na validação do reCAPTCHA. Tente novamente.")
+
     user = db.query(User).filter(User.email == data.email).first()
     if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(401, "E-mail ou senha inválidos")

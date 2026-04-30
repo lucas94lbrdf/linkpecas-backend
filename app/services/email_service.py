@@ -14,7 +14,7 @@ def send_email(to_email: str, subject: str, html_content: str):
             "Content-Type": "application/json"
         }
         data = {
-            "from": f"Auto Marketplace <{SENDER_EMAIL}>",
+            "from": f"LinkPeças <{SENDER_EMAIL}>",
             "to": [to_email],
             "subject": subject,
             "html": html_content

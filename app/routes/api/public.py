@@ -12,6 +12,7 @@ from app.models.ad_compatibility import AdCompatibility
 from app.models.click import ClickEvent
 from app.models.user import User
 from app.models.vehicle import Manufacturer, VehicleModel
+from app.models.setting import SystemSetting
 from app.utils.activity import _get_device, _get_location
 
 router = APIRouter()
@@ -439,3 +440,10 @@ def log_search(data: SearchLogSchema, db: Session = Depends(get_db)):
     db.commit()
     
     return {"status": "ok"}
+
+@router.get("/tracking")
+def get_tracking_ids(db: Session = Depends(get_db)):
+    keys = ["google_analytics_id", "google_tag_manager_id", "google_search_console_id", "recaptcha_site_key"]
+    settings = db.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
+
+    return {s.key: s.value for s in settings}

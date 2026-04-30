@@ -12,7 +12,9 @@ from app.models.ad import Ad
 from app.models.click import ClickEvent
 from app.models.log import ActivityLog
 from app.models.vehicle import Manufacturer, VehicleModel
+from app.models.setting import SystemSetting
 from app.routes.api.auth import get_admin_user
+from app.utils.encryption import encrypt, decrypt
 router = APIRouter(dependencies=[Depends(get_admin_user)])
 
 
@@ -710,3 +712,39 @@ def get_plans():
         {"id": 3, "name": "Pro", "price": 29.90, "link_limit": 50, "status": "Ativo"},
         {"id": 4, "name": "Premium", "price": 79.00, "link_limit": 9999, "status": "Ativo"}
     ]
+
+# --- CONFIGURAÇÕES DO SISTEMA ---
+
+ENCRYPTED_KEYS = ["openai_api_key", "gemini_api_key", "claude_api_key", "recaptcha_secret_key"]
+
+@router.get("/settings")
+def get_admin_settings(db: Session = Depends(get_db)):
+    settings = db.query(SystemSetting).all()
+    results = []
+    for s in settings:
+        val = s.value
+        if s.key in ENCRYPTED_KEYS and val:
+            val = "sk-****" + val[-4:] if len(val) > 4 else "sk-****"
+        results.append({"key": s.key, "value": val, "description": s.description})
+    return results
+
+class UpdateSettingSchema(BaseModel):
+    value: str
+
+@router.put("/settings/{key}")
+def update_setting(key: str, data: UpdateSettingSchema, db: Session = Depends(get_db)):
+    setting = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    if not setting:
+        setting = SystemSetting(key=key, value="", description="")
+        db.add(setting)
+    
+    if key in ENCRYPTED_KEYS:
+        if data.value and "sk-****" in data.value:
+            pass # Keep existing encrypted value
+        else:
+            setting.value = encrypt(data.value)
+    else:
+        setting.value = data.value
+        
+    db.commit()
+    return {"message": "Configuração atualizada com sucesso", "key": key}

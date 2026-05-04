@@ -79,7 +79,7 @@ def health():
 
 @app.get("/api/version")
 def get_version():
-    return {"version": "1.0.1-tracking-fix", "timestamp": "2026-05-04 12:00"}
+    return {"version": "1.0.1-tracking-settings-fix", "timestamp": "2026-05-04 12:00"}
 
 
 # Cria o modelo de dados que a rota vai receber

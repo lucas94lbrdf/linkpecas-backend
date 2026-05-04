@@ -42,7 +42,7 @@ def build_public_ad_payload(ad: Ad, user_plan: str | None = None):
     except (TypeError, ValueError):
         avg_rating = 0.0
 
-    return {
+    return { 
         "id": str(ad.id),
         "title": ad.title,
         "slug": ad.slug,

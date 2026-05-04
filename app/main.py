@@ -74,7 +74,12 @@ app.include_router(enthusiast_router, prefix="/api/enthusiast", tags=["Enthusias
 
 @app.get("/")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "1.0.1-tracking-fix"}
+
+
+@app.get("/api/version")
+def get_version():
+    return {"version": "1.0.1-tracking-fix", "timestamp": "2026-05-04 12:00"}
 
 
 # Cria o modelo de dados que a rota vai receber

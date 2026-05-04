@@ -18,6 +18,15 @@ from app.utils.activity import _get_device, _get_location
 router = APIRouter()
 
 
+@router.get("/tracking", tags=["Public"])
+def get_tracking_ids(db: Session = Depends(get_db)):
+    """Retorna os IDs de rastreamento configurados no sistema (GA, GTM, etc)"""
+    keys = ["google_analytics_id", "google_tag_manager_id", "google_search_console_id", "recaptcha_site_key"]
+    settings = db.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
+
+    return {s.key: s.value for s in settings}
+
+
 def build_public_ad_payload(ad: Ad, user_plan: str | None = None):
     # Valores padrão seguros
     try:
@@ -441,10 +450,4 @@ def log_search(data: SearchLogSchema, db: Session = Depends(get_db)):
     
     return {"status": "ok"}
 
-@router.get("/tracking")
-def get_tracking_ids(db: Session = Depends(get_db)):
-    keys = ["google_analytics_id", "google_tag_manager_id", "google_search_console_id", "recaptcha_site_key"]
-    settings = db.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
-
-    return {s.key: s.value for s in settings}
  

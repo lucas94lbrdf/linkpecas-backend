@@ -16,3 +16,6 @@ email-validator
 stripe
 prometheus-fastapi-instrumentator
 openai
+slowapi
+limits
+meilisearch

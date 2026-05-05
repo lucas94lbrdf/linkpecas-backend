@@ -228,10 +228,19 @@ def _handle_checkout_completed(session: dict, db: Session):
     user.stripe_subscription_id = sub_id
     user.subscription_status = "active"
 
+    old_plan = user.plan  # captura antes de commit
     if sub_id:
         _upsert_subscription(db, user, sub_id, plan, "active")
     else:
         db.commit()
+
+    # Notificação WebSocket
+    import asyncio
+    from app.services.notification_service import notify_plan_updated
+    try:
+        asyncio.create_task(notify_plan_updated(db, user.id, old_plan or "free", plan))
+    except Exception as e:
+        print(f"Notificação plan_updated falhou: {e}")
 
 
 def _handle_subscription_updated(subscription: dict, db: Session):
@@ -254,6 +263,7 @@ def _handle_subscription_updated(subscription: dict, db: Session):
 
     user.stripe_subscription_id = sub_id
     user.subscription_status = status
+    old_plan = user.plan
     if plan:
         user.plan = plan if status == "active" else "free"
 
@@ -261,6 +271,15 @@ def _handle_subscription_updated(subscription: dict, db: Session):
         _upsert_subscription(db, user, sub_id, plan if status == "active" else "free", status, started_at, expires_at)
     else:
         db.commit()
+
+    # Notificação WebSocket se plano mudou
+    if plan and plan != old_plan:
+        import asyncio
+        from app.services.notification_service import notify_plan_updated
+        try:
+            asyncio.create_task(notify_plan_updated(db, user.id, old_plan or "free", plan))
+        except Exception as e:
+            print(f"Notificação plan_updated falhou: {e}")
 
 
 def _handle_subscription_deleted(subscription: dict, db: Session):

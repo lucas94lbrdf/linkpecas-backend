@@ -5,10 +5,11 @@
 # ==========================================================
 import os
 import json
-from fastapi import FastAPI, Response, Depends
+from fastapi import FastAPI, Response, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from app.db.session import get_db
 from app.models.ad import Ad
 from app.models.setting import SystemSetting
@@ -30,6 +31,16 @@ from app.routes.api.enthusiast import router as enthusiast_router
 from prometheus_fastapi_instrumentator import Instrumentator
 from openai import OpenAI
 
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from app.core.rate_limit import limiter, log_rate_limit_exceeded, get_remote_address
+from app.services.search_service import init_meilisearch_index
+from app.routes.api.notifications import router as notifications_router
+from app.routes.ws.notifications import router as ws_router
+from app.routes.api.link_health import router as link_health_router
+from app.core.websocket_manager import manager as ws_manager
+import asyncio
+
 
 # Removido: cliente OpenAI global estático para permitir leitura dinâmica do banco
 
@@ -39,8 +50,46 @@ app = FastAPI(
     version="1.0.1"
 )
 
+@app.on_event("startup")
+async def startup_event():
+    """Inicializa índice do Meilisearch e inicia subscriber Redis para WebSocket."""
+    # Meilisearch
+    try:
+        init_meilisearch_index()
+    except Exception as e:
+        print(f"Aviso: Não foi possível conectar ao Meilisearch no startup: {e}")
+
+    # Redis Pub/Sub para WebSocket
+    asyncio.create_task(ws_manager.start_redis_subscriber())
+
+# Adiciona Limiter de Requisições
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    ip = get_remote_address(request)
+    route = request.url.path
+    log_rate_limit_exceeded(ip, route)
+    
+    response = Response(
+        content='{"detail": "Limite de requisições excedido. Tente novamente em alguns segundos."}',
+        status_code=429,
+        media_type="application/json"
+    )
+    # retry-after is usually in exc.headers if slowapi sets it
+    retry_after = exc.headers.get("Retry-After")
+    if retry_after:
+        response.headers["Retry-After"] = retry_after
+    return response
+
 # Monitoramento do Prometheus
 Instrumentator().instrument(app).expose(app)
+
+# Middlewares de Segurança
+app.add_middleware(
+    TrustedHostMiddleware, allowed_hosts=["linkpecas.online", "www.linkpecas.online", "localhost", "127.0.0.1", "api"]
+)
 
 # Configuração de CORS
 app.add_middleware(
@@ -70,6 +119,9 @@ app.include_router(categories_router, prefix="/api/categories", tags=["Categorie
 app.include_router(vehicles_router, prefix="/api", tags=["Vehicles"])
 app.include_router(payments_router, prefix="/api/payments", tags=["Payments"])
 app.include_router(enthusiast_router, prefix="/api/enthusiast", tags=["Enthusiast"])
+app.include_router(notifications_router, prefix="/api", tags=["Notifications"])
+app.include_router(ws_router, tags=["WebSocket"])
+app.include_router(link_health_router, prefix="/api/admin/link-health", tags=["Link Health"])
 
 
 @app.get("/")
@@ -90,7 +142,8 @@ class MensagemCliente(BaseModel):
 
 # Rota do nosso Balconista Inteligente
 @app.post("/chat/balcao")
-def chat_balcao(mensagem: MensagemCliente, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def chat_balcao(request: Request, mensagem: MensagemCliente, db: Session = Depends(get_db)):
     setting = db.query(SystemSetting).filter(SystemSetting.key == "openai_api_key").first()
     api_key = decrypt(setting.value) if setting and setting.value else os.getenv("OPENAI_API_KEY")
     

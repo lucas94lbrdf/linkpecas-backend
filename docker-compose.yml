@@ -8,8 +8,6 @@ services:
         GIT_SHA: ${GIT_SHA:-dev}
     container_name: linkpecas_api
     restart: always
-    ports:
-      - "80:8000"
     depends_on:
       - postgres
       - redis
@@ -37,6 +35,46 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+
+  nginx:
+    image: nginx:alpine
+    container_name: linkpecas_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl/:/etc/nginx/ssl/
+      - ./nginx/logs/:/var/log/nginx/
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - api
+
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    depends_on:
+      - nginx
+
+  meilisearch:
+    image: getmeili/meilisearch:latest
+    container_name: linkpecas_meilisearch
+    restart: always
+    environment:
+      MEILI_MASTER_KEY: '664fe24934636943211567b84d631a2e'
+      MEILI_NO_ANALYTICS: 'true'
+      MEILI_ENV: 'production'
+    ports:
+      - "127.0.0.1:7700:7700"
+    volumes:
+      - meili_data:/meili_data
+    # Exposta apenas para localhost:7700 para permitir desenvolvimento local fora do Docker
 
   # --- INÍCIO DA STACK DE MONITORAMENTO ---
   node-exporter:
@@ -110,3 +148,4 @@ volumes:
   postgres_data:
   redis_data:
   prometheus_data:
+  meili_data:

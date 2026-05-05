@@ -59,6 +59,8 @@ class Ad(Base):
     image_url = Column(Text, nullable=True)
     image_urls = Column(JSON, nullable=True)
     external_url = Column(Text, nullable=False)
+    last_link_check_at = Column(DateTime, nullable=True)
+    link_status = Column(String(20), default="pending_review") # active, unavailable, error, pending_review
     condition = Column(String(20), default="new") # new, used
     warranty = Column(String(100), nullable=True)
     free_shipping = Column(Boolean, default=False)
@@ -67,7 +69,7 @@ class Ad(Base):
     city = Column(String(150), nullable=True)
     state = Column(String(150), nullable=True)
 
-    is_universal = Column(Boolean, nullable=False, default=True, server_default=func.true())
+    is_universal = Column(Boolean, nullable=False, default=True, server_default='true')
     manufacturer_id = Column(
         UUID(as_uuid=True),
         ForeignKey("manufacturers.id", ondelete="SET NULL"),

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, case
 from typing import List, Optional
 from datetime import datetime, timedelta
+from app.services import search_service as meili
 
 from app.db.session import get_db
 from app.models.user import User
@@ -247,9 +248,56 @@ def update_ad_status(ad_id: str, data: dict, db: Session = Depends(get_db)):
         raise HTTPException(404, "Anúncio não encontrado")
     
     new_status = data.get("status")
+    reason = data.get("reason", "")
     if new_status:
+        old_status = ad.status
         ad.status = new_status
         db.commit()
+
+        # Sincroniza com Meilisearch
+        try:
+            if new_status == "active":
+                from app.models.user import User
+                from app.models.vehicle import Manufacturer, VehicleModel
+                user = db.query(User).filter(User.id == ad.user_id).first()
+                manufacturer = db.query(Manufacturer).filter(Manufacturer.id == ad.manufacturer_id).first() if ad.manufacturer_id else None
+                model = db.query(VehicleModel).filter(VehicleModel.id == ad.model_id).first() if ad.model_id else None
+                meili.index_ad({
+                    "id": str(ad.id),
+                    "title": ad.title,
+                    "description": ad.description,
+                    "vehicle_brand": manufacturer.name if manufacturer else None,
+                    "vehicle_model": model.name if model else None,
+                    "year_min": ad.year_start,
+                    "year_max": ad.year_end,
+                    "price": float(ad.price) if ad.price else None,
+                    "city": ad.city,
+                    "state": ad.state,
+                    "status": ad.status,
+                    "category_id": str(ad.category_id) if ad.category_id else None,
+                    "category_name": ad.category,
+                    "shop_id": str(user.id) if user else None,
+                    "shop_name": user.shop_name if user else None,
+                    "created_at": ad.created_at.timestamp() if ad.created_at else None,
+                    "views_count": ad.views_count or 0,
+                })
+            else:
+                meili.delete_ad_index(str(ad.id))
+        except Exception as e:
+            print(f"Meilisearch sync em update_ad_status falhou: {e}")
+
+        # Notificações WebSocket em tempo real
+        import asyncio
+        from app.services.notification_service import (
+            notify_ad_approved, notify_ad_rejected
+        )
+        try:
+            if new_status == "active" and old_status != "active":
+                asyncio.create_task(notify_ad_approved(db, ad.user_id, str(ad.id), ad.title))
+            elif new_status in ("rejected", "inactive") and old_status != new_status:
+                asyncio.create_task(notify_ad_rejected(db, ad.user_id, str(ad.id), ad.title, reason))
+        except Exception as e:
+            print(f"Notificação WS falhou: {e}")
 
     return {"message": "Status atualizado", "new_status": ad.status}
 
@@ -268,14 +316,22 @@ def check_expired_ads(db: Session = Depends(get_db)):
     count = 0
     for ad in expired_ads:
         ad.status = "expired"
-        
-        # Só tenta enviar e-mail se o usuário existir
+
         if ad.user:
             try:
                 send_product_expired(ad.user.email, ad.user.name, ad.title)
             except Exception as e:
                 print(f"Erro ao enviar email para {ad.user.email}: {e}")
-        
+
+            # Notificação WebSocket de expiração
+            import asyncio
+            from app.services.notification_service import notify_ad_expired
+            try:
+                expired_at = ad.expires_at.isoformat() if ad.expires_at else ""
+                asyncio.create_task(notify_ad_expired(db, ad.user_id, str(ad.id), ad.title, expired_at))
+            except Exception as e:
+                print(f"Notificação WS expiração falhou: {e}")
+
         count += 1
 
     if count > 0:
@@ -749,3 +805,38 @@ def get_plans():
         {"id": 3, "name": "Pro", "price": 29.90, "link_limit": 50, "status": "Ativo"},
         {"id": 4, "name": "Premium", "price": 79.00, "link_limit": 9999, "status": "Ativo"}
     ]
+
+# --- RATE LIMIT STATS ---
+
+@router.get("/rate-limits/stats")
+def get_rate_limit_stats():
+    import redis
+    from datetime import datetime
+    
+    # Conecta no Redis
+    redis_client = redis.Redis.from_url("redis://redis:6379", decode_responses=True)
+    today = datetime.utcnow().strftime('%Y-%m-%d')
+    
+    try:
+        # Total bloqueado por rota hoje
+        routes = redis_client.hgetall(f"ratelimit:route:{today}")
+        routes_data = [{"route": k, "count": int(v)} for k, v in routes.items()]
+        routes_data = sorted(routes_data, key=lambda x: x["count"], reverse=True)
+        
+        # Top 10 IPs
+        ips = redis_client.zrevrange(f"ratelimit:ips:{today}", 0, 9, withscores=True)
+        ips_data = [{"ip": ip, "count": int(score)} for ip, score in ips]
+        
+        # Bloqueios por hora
+        hourly = redis_client.hgetall("ratelimit:hourly")
+        hourly_data = [{"hour": k, "count": int(v)} for k, v in hourly.items()]
+        # Ordena cronologicamente e pega as últimas 24 horas registradas
+        hourly_data = sorted(hourly_data, key=lambda x: x["hour"])[-24:]
+        
+        return {
+            "routes": routes_data,
+            "top_ips": ips_data,
+            "hourly": hourly_data
+        }
+    except Exception as e:
+        return {"error": "Falha ao consultar estatísticas no Redis.", "details": str(e)}

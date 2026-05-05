@@ -14,6 +14,8 @@ from app.models.user import User
 from app.models.vehicle import Manufacturer, VehicleModel
 from app.models.setting import SystemSetting
 from app.utils.activity import _get_device, _get_location
+from app.core.rate_limit import limiter
+from app.services.search_service import search_ads as meili_search
 
 router = APIRouter()
 
@@ -69,15 +71,71 @@ def build_public_ad_payload(ad: Ad, user_plan: str | None = None):
 
 
 @router.get("/ads")
+@limiter.limit("30/minute")
 def search_ads(
+    request: Request,
     q: str = None,
     category: str = None,
     brand: str = None,
     model: str = None,
     year: int = None,
+    price_min: float = None,
+    price_max: float = None,
+    city: str = None,
+    page: int = 1,
+    limit: int = 40,
     include_universal: bool = True,
     db: Session = Depends(get_db),
 ):
+    # 1. TENTATIVA VIA MEILISEARCH
+    try:
+        filters = ["status = 'active'"]
+        if category and category != "all":
+            filters.append(f"category_name = '{category}'")
+        if brand:
+            filters.append(f"vehicle_brand = '{brand}'")
+        if model:
+            filters.append(f"vehicle_model = '{model}'")
+        if year:
+            filters.append(f"(year_min <= {year} OR year_min IS NULL)")
+            filters.append(f"(year_max >= {year} OR year_max IS NULL)")
+        if price_min is not None:
+            filters.append(f"price >= {price_min}")
+        if price_max is not None:
+            filters.append(f"price <= {price_max}")
+        if city:
+            filters.append(f"city = '{city}'")
+
+        filter_str = " AND ".join(filters) if filters else None
+
+        meili_res = meili_search(
+            query=q or "",
+            filters=filter_str,
+            page=page,
+            limit=limit
+        )
+
+        # Precisamos buscar os dados do usuário para preencher "plan" e etc, já que o Meilisearch não retorna
+        # Ou podemos mapear os hits para os dicionários e buscar do DB apenas para formatar
+        ad_ids = [hit['id'] for hit in meili_res['hits']]
+        if ad_ids:
+            # Buscar do banco para reformatar com build_public_ad_payload
+            ads_db = db.query(Ad, User.plan.label("user_plan")).join(User, Ad.user_id == User.id).filter(Ad.id.in_(ad_ids)).all()
+            
+            # Reordenar de acordo com o retorno do Meilisearch
+            ads_dict = {str(ad[0].id): ad for ad in ads_db}
+            sorted_ads = [ads_dict[ad_id] for ad_id in ad_ids if ad_id in ads_dict]
+            
+            return [build_public_ad_payload(ad, user_plan) for ad, user_plan in sorted_ads]
+        else:
+            return []
+
+    except Exception as e:
+        print(f"Meilisearch falhou, fallback SQL: {e}")
+        # FALLBACK PARA SQL
+        pass
+
+    # 2. FALLBACK SQL
     plan_priority = case(
         (User.plan == "premium", 4),
         (User.plan == "pro", 3),
@@ -96,6 +154,13 @@ def search_ads(
     if q:
         search_term = f"%{q}%"
         query = query.filter(or_(Ad.title.ilike(search_term), Ad.description.ilike(search_term)))
+        
+    if price_min is not None:
+        query = query.filter(Ad.price >= price_min)
+    if price_max is not None:
+        query = query.filter(Ad.price <= price_max)
+    if city:
+        query = query.filter(Ad.city.ilike(f"%{city}%"))
 
     if brand and model:
         manufacturer = db.query(Manufacturer).filter(Manufacturer.slug == brand).first()
@@ -146,7 +211,7 @@ def search_ads(
         else:
             query = query.filter(Ad.is_universal.is_(True)) if include_universal else query.filter(False)
 
-    results = query.order_by(plan_priority.desc(), Ad.views_count.desc(), Ad.created_at.desc()).limit(40).all()
+    results = query.order_by(plan_priority.desc(), Ad.views_count.desc(), Ad.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
     return [build_public_ad_payload(ad, user_plan) for ad, user_plan in results]
 
 

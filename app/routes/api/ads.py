@@ -20,6 +20,8 @@ from app.models.community import Community
 from app.models.rating import AdRating
 from app.routes.api.auth import get_current_user
 from app.utils.activity import log_activity
+from app.services import search_service as meili
+from app.tasks.link_checker_tasks import check_single_link
 
 PLAN_LIMITS = {
     "free": 3,
@@ -140,6 +142,8 @@ def serialize_ad(ad: Ad, db: Session = None):
         "engine": ad.engine,
         "expires_at": ad.expires_at.isoformat() if ad.expires_at else None,
         "compatibilities": [],
+        "link_status": ad.link_status,
+        "last_link_check_at": ad.last_link_check_at.isoformat() if ad.last_link_check_at else None,
     }
     if db:
         base["compatibilities"] = _load_compatibilities(ad.id, db)
@@ -332,11 +336,36 @@ def create_ad(
     except Exception as e:
         print(f"Failed to send email: {e}")
 
+    # Indexa no Meilisearch apenas se aprovado
+    if ad.status == "active":
+        try:
+            meili.index_ad({
+                "id": str(ad.id),
+                "title": ad.title,
+                "description": ad.description,
+                "vehicle_brand": manufacturer.name if manufacturer else None,
+                "vehicle_model": model.name if model else None,
+                "year_min": ad.year_start,
+                "year_max": ad.year_end,
+                "price": float(ad.price) if ad.price else None,
+                "city": ad.city,
+                "state": ad.state,
+                "status": ad.status,
+                "category_id": str(ad.category_id) if ad.category_id else None,
+                "category_name": ad.category,
+                "shop_id": str(current_user.id),
+                "shop_name": current_user.shop_name,
+                "created_at": ad.created_at.timestamp() if ad.created_at else None,
+                "views_count": ad.views_count or 0,
+            })
+        except Exception as e:
+            print(f"Meilisearch index_ad falhou: {e}")
+
     return {
         "message": "created",
         "slug": slug,
         "short_code": short_code,
-        "tracking_url": f"http://localhost:8000/api/ads/go/{short_code}",
+        "tracking_url": f"/api/ads/go/{short_code}",
     }
 
 
@@ -542,6 +571,27 @@ def update_ad(
     log_activity(db, request, "AD_UPDATE", "ad", ad_id,
                  f"Link atualizado: '{data.title}'", current_user.id)
 
+    # Atualiza índice no Meilisearch
+    try:
+        if ad.status == "active":
+            meili.update_ad_index(ad_id, {
+                "title": ad.title,
+                "description": ad.description,
+                "vehicle_brand": manufacturer.name if manufacturer else None,
+                "vehicle_model": model.name if model else None,
+                "price": float(ad.price) if ad.price else None,
+                "city": ad.city,
+                "state": ad.state,
+                "status": ad.status,
+                "category_name": ad.category,
+                "year_min": ad.year_start,
+                "year_max": ad.year_end,
+            })
+        else:
+            meili.delete_ad_index(ad_id)
+    except Exception as e:
+        print(f"Meilisearch update_ad_index falhou: {e}")
+
     return {"message": "updated"}
 
 
@@ -566,6 +616,12 @@ def delete_ad(
 
     log_activity(db, request, "AD_DELETE", "ad", ad_id,
                  f"Link removido: '{title}'", current_user.id)
+
+    # Remove do Meilisearch
+    try:
+        meili.delete_ad_index(ad_id)
+    except Exception as e:
+        print(f"Meilisearch delete_ad_index falhou: {e}")
 
     return {"message": "deleted"}
 
@@ -619,3 +675,29 @@ def rate_ad(
         "average_rating": float(avg),
         "rating_count": count
     }
+
+
+@router.post("/{ad_id}/recheck-link")
+def recheck_link(
+    ad_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ad = db.query(Ad).filter(Ad.id == ad_id).first()
+    if not ad:
+        raise HTTPException(404, "not found")
+
+    # Verificação de segurança: Dono ou Admin
+    if ad.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(403, "Acesso negado: Você não tem permissão para rechecar este anúncio.")
+
+    if not ad.external_url:
+        raise HTTPException(400, "Anúncio não possui link externo.")
+
+    ad.link_status = "pending_review"
+    db.commit()
+
+    check_single_link.delay(str(ad.id), ad.external_url)
+    
+    return {"message": "Link check scheduled"}
+

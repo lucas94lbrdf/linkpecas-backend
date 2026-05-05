@@ -10,6 +10,9 @@ from app.models.community import Community
 from app.models.marketplace import Marketplace
 from app.models.search_log import SearchLog
 from app.models.setting import SystemSetting
+from app.models.notification import Notification
+from app.models.link_check import LinkCheck
+from app.models.scraping_config import ScrapingConfig
 
 
 __all__ = [
@@ -27,4 +30,7 @@ __all__ = [
     "Marketplace",
     "SearchLog",
     "SystemSetting",
+    "Notification",
+    "LinkCheck",
+    "ScrapingConfig",
 ]

@@ -34,4 +34,13 @@ jobs:
             echo "==> Subindo containers"
             docker-compose up -d
 
-            echo "==> Deploy finalizado"
+            echo "==> Aguardando API ficar pronta..."
+            sleep 10
+
+            echo "==> Sincronizando Meilisearch (indexação inicial)"
+            docker-compose exec -T api python app/scripts/sync_meilisearch.py || echo "Aviso: sync Meilisearch falhou (não crítico)"
+
+            echo "==> Recarregando Nginx"
+            docker-compose exec -T nginx nginx -s reload || echo "Aviso: nginx reload falhou"
+
+            echo "==> Deploy finalizado com sucesso!"

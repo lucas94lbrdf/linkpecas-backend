@@ -14,6 +14,7 @@ from app.models.user import User
 from app.models.setting import SystemSetting
 from app.utils.activity import log_activity
 from app.utils.encryption import decrypt
+from app.core.rate_limit import limiter
 import requests
 
 # ==========================================================
@@ -138,6 +139,7 @@ from app.services.email_service import send_welcome_email, send_password_recover
 import uuid
 
 @router.post("/register")
+@limiter.limit("3/minute")
 async def register(request: Request, data: RegisterSchema, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(400, "E-mail já cadastrado")
@@ -184,6 +186,7 @@ async def forgot_password(data: ForgotPasswordSchema, db: Session = Depends(get_
     return {"message": "Se o e-mail existir, você receberá um link de recuperação."}
 
 @router.post("/login")
+@limiter.limit("5/minute")
 async def login(request: Request, data: LoginSchema, db: Session = Depends(get_db)):
     # Validação reCAPTCHA
     recaptcha_setting = db.query(SystemSetting).filter(SystemSetting.key == "recaptcha_secret_key").first()

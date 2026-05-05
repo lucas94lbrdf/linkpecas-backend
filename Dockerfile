@@ -29,4 +29,4 @@ COPY . .
 EXPOSE 8000
 
 # Comando para rodar a aplicação usando a porta dinâmica
-CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT
+CMD uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"

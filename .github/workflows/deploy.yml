@@ -1,23 +1,45 @@
 name: Deploy Backend to GCP
 
 on:
-  push:
-    branches: [ "main" ]
+push:
+branches: [ "main" ]
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+deploy:
+runs-on: ubuntu-latest
 
-    steps:
-    - name: Executando deploy no servidor GCP
-      uses: appleboy/ssh-action@master
-      with:
-        host: ${{ secrets.GCP_HOST }}
-        username: ${{ secrets.GCP_USERNAME }}
-        key: ${{ secrets.GCP_SSH_KEY }}
-        command_timeout: 30m
-        script: |
-          cd ~/linkpecas-backend
-          git pull origin main
-          docker-compose down
-          docker-compose up -d --build
+```
+steps:
+- name: Deploy via SSH
+  uses: appleboy/ssh-action@v1.0.3
+  with:
+    host: ${{ secrets.GCP_HOST }}
+    username: ${{ secrets.GCP_USERNAME }}
+    key: ${{ secrets.GCP_SSH_KEY }}
+    command_timeout: 30m
+    script: |
+      set -e
+
+      cd ~/linkpecas-backend
+
+      echo "==> Sync código"
+      git fetch origin
+      git reset --hard origin/main
+
+      echo "==> Parando containers"
+      docker-compose down --remove-orphans
+
+      echo "==> Build limpo"
+      docker-compose build --no-cache
+
+      echo "==> Subindo containers"
+      docker-compose up -d
+
+      echo "==> Aguardando API subir"
+      sleep 10
+
+      echo "==> Verificando versão"
+      curl -s https://api.linkpecas.online/openapi.json | jq '.info' || true
+
+      echo "==> Deploy finalizado"
+```

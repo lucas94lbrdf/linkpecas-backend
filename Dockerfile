@@ -1,6 +1,9 @@
 # Dockerfile - Backend LinkPeça Marketplace
 FROM python:3.11-slim-bullseye
 
+ARG GIT_SHA
+ENV GIT_SHA=$GIT_SHA
+
 # Impede que o Python gere arquivos .pyc e permite logs em tempo real
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

@@ -2,11 +2,14 @@ version: "3.9"
 
 services:
   api:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
     container_name: linkpecas_api
     restart: always
     ports:
-      - "80:8000"
+      - "8000:8000"
     depends_on:
       - postgres
       - redis
@@ -64,7 +67,6 @@ services:
     container_name: loki
     restart: always
 
-
   promtail:
     image: grafana/promtail:latest
     container_name: promtail
@@ -99,7 +101,7 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin # Você pode trocar esta senha se quiser
+      - GF_SECURITY_ADMIN_PASSWORD=admin
     depends_on:
       - prometheus
   # --- FIM DA STACK DE MONITORAMENTO ---
@@ -107,4 +109,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  prometheus_data: # Volume adicionado para salvar os dados dos gráficos
+  prometheus_data:

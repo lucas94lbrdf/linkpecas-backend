@@ -78,10 +78,12 @@ def health():
 
 
 @app.get("/api/version")
-def get_version():
-    return {"version": "1.0.1-tracking-settings-fix", "timestamp": "2026-05-04 12:00"}
-
-
+def version():
+    return {
+        "git_sha": os.getenv("GIT_SHA", "unknown"),
+        "env": os.getenv("ENV", "unknown"),
+        "version": os.getenv("APP_VERSION", "unknown")
+    }
 # Cria o modelo de dados que a rota vai receber
 class MensagemCliente(BaseModel):
     texto: str

@@ -19,3 +19,4 @@ openai
 slowapi
 limits
 meilisearch
+beautifulsoup4==4.12.3

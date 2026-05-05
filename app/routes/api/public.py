@@ -20,6 +20,7 @@ router = APIRouter()
 
 @router.get("/tracking", tags=["Public"]) # Use @router e não @app
 def get_tracking_ids(db: Session = Depends(get_db)):
+    """Retorna  as configurações de tracking para o painel administrativo"""
     keys = ["google_analytics_id", "google_tag_manager_id", "google_search_console_id", "recaptcha_site_key"]
     settings = db.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
     return {s.key: s.value for s in settings}

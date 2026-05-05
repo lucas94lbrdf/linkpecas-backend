@@ -25,7 +25,7 @@ class UpdateSettingSchema(BaseModel):
 
 @router.get("/settings", tags=["Admin"])
 def get_admin_settings(db: Session = Depends(get_db)):
-    """Retorna todas as configurações do sistema para o painel administrativo"""
+    """Retorna todas as configurações do sistema de tracking para o painel administrativo"""
     settings = db.query(SystemSetting).all()
     results = []
     for s in settings:

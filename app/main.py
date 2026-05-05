@@ -88,7 +88,7 @@ Instrumentator().instrument(app).expose(app)
 
 # Middlewares de Segurança
 app.add_middleware(
-    TrustedHostMiddleware, allowed_hosts=["linkpecas.online", "www.linkpecas.online", "localhost", "127.0.0.1", "api"]
+   TrustedHostMiddleware, allowed_hosts=["linkpecas.online", "www.linkpecas.online", "api.linkpecas.online", "localhost", "127.0.0.1", "api"]
 )
 
 # Configuração de CORS

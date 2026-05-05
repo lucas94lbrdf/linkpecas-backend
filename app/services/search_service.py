@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parents[2] / ".env"
 load_dotenv(env_path)
 
-MEILI_URL = os.getenv("MEILI_URL", "http://localhost:7700")
+MEILI_URL = os.getenv("MEILI_URL", "http://meilisearch:7700")
 MEILI_MASTER_KEY = os.getenv("MEILI_MASTER_KEY", "664fe24934636943211567b84d631a2e")
 INDEX_NAME = "ads"
 

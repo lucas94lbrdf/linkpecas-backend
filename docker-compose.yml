@@ -2,6 +2,8 @@ services:
   api:
     container_name: linkpecas_api
     build: .
+    env_file:
+      - .env
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     expose:
       - "8000"

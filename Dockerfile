@@ -22,10 +22,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# --- ADIÇÃO DO PLAYWRIGHT E NAVEGADORES ---
+RUN playwright install chromium
+RUN playwright install-deps
+# ------------------------------------------
+
 # Copia o restante do código
 COPY . .
 
-# Expõe a porta padrão (embora o Cloud Run use a variável $PORT)
+# Expõe a porta padrão
 EXPOSE 8000
 
 # Comando para rodar a aplicação usando a porta dinâmica

@@ -2,28 +2,23 @@ version: "3.9"
 
 services:
   api:
-    build:
-      context: .
-      args:
-        GIT_SHA: ${GIT_SHA:-dev}
     container_name: linkpecas_api
-    restart: always
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    expose:
+      - "8000"
     depends_on:
-      - postgres
+      - db
       - redis
-    env_file:
-      - .env
 
-  postgres:
+  db:
     image: postgres:16
     container_name: linkpecas_db
     restart: always
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: linkpecas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -31,10 +26,6 @@ services:
     image: redis:7
     container_name: linkpecas_redis
     restart: always
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
 
   nginx:
     image: nginx:alpine
@@ -44,11 +35,9 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/ssl/:/etc/nginx/ssl/
-      - ./nginx/logs/:/var/log/nginx/
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
     depends_on:
       - api
 
@@ -56,96 +45,16 @@ services:
     image: certbot/certbot
     container_name: certbot
     volumes:
-      - ./certbot/conf:/etc/letsencrypt
-      - ./certbot/www:/var/www/certbot
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-    depends_on:
-      - nginx
-
-  meilisearch:
-    image: getmeili/meilisearch:latest
-    container_name: linkpecas_meilisearch
-    restart: always
-    environment:
-      MEILI_MASTER_KEY: '664fe24934636943211567b84d631a2e'
-      MEILI_NO_ANALYTICS: 'true'
-      MEILI_ENV: 'production'
-    ports:
-      - "127.0.0.1:7700:7700"
-    volumes:
-      - meili_data:/meili_data
-    # Exposta apenas para localhost:7700 para permitir desenvolvimento local fora do Docker
-
-  # --- INÍCIO DA STACK DE MONITORAMENTO ---
-  node-exporter:
-    image: prom/node-exporter:latest
-    container_name: node-exporter
-    restart: always
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - '--path.procfs=/host/proc'
-      - '--path.rootfs=/rootfs'
-      - '--path.sysfs=/host/sys'
-      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
-
-  postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:latest
-    container_name: postgres-exporter
-    restart: always
-    environment:
-      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
-    depends_on:
-      - postgres
-
-  loki:
-    image: grafana/loki:latest
-    container_name: loki
-    restart: always
-
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
-    restart: always
-    user: root
-    volumes:
-      - ./promtail-config.yml:/etc/promtail/config.yml
-      - /var/run/docker.sock:/var/run/docker.sock
-    command:
-      - -config.file=/etc/promtail/config.yml
-    depends_on:
-      - loki
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    restart: always
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    depends_on:
-      - node-exporter
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    restart: always
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    depends_on:
-      - prometheus
-  # --- FIM DA STACK DE MONITORAMENTO ---
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew;
+        sleep 12h & wait $${!};
+      done"
 
 volumes:
   postgres_data:
-  redis_data:
-  prometheus_data:
-  meili_data:
+  certbot_www:
+  certbot_conf:

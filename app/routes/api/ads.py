@@ -4,6 +4,7 @@ import string
 import unicodedata
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
@@ -115,10 +116,13 @@ def validate_vehicle_payload(data: "AdSchema", db: Session):
 
 
 def serialize_ad(ad: Ad, db: Session = None):
+    views  = ad.views_count or 0
+    clicks = ad.clicks_count or 0
     base = {
         "id": str(ad.id),
         "title": ad.title,
         "slug": ad.slug,
+        "short_code": ad.short_code,
         "description": ad.description,
         "price": float(ad.price) if ad.price else 0.0,
         "old_price": float(ad.old_price) if ad.old_price else None,
@@ -140,10 +144,15 @@ def serialize_ad(ad: Ad, db: Session = None):
         "year_start": ad.year_start,
         "year_end": ad.year_end,
         "engine": ad.engine,
+        "created_at": ad.created_at.isoformat() if ad.created_at else None,
         "expires_at": ad.expires_at.isoformat() if ad.expires_at else None,
         "compatibilities": [],
         "link_status": ad.link_status,
         "last_link_check_at": ad.last_link_check_at.isoformat() if ad.last_link_check_at else None,
+        "views_count": views,
+        "clicks_count": clicks,
+        "unique_clicks": ad.unique_clicks or 0,
+        "ctr": round((clicks / views * 100), 1) if views > 0 else 0.0,
     }
     if db:
         base["compatibilities"] = _load_compatibilities(ad.id, db)
@@ -458,6 +467,43 @@ def get_ad(ad_id: str, db: Session = Depends(get_db)):
     return serialize_ad(ad, db)
 
 
+def _detect_device(user_agent: str | None) -> str:
+    if not user_agent:
+        return "desktop"
+    ua = user_agent.lower()
+    if "ipad" in ua or "tablet" in ua:
+        return "tablet"
+    if "mobile" in ua or "android" in ua or "iphone" in ua or "ipod" in ua:
+        return "mobile"
+    return "desktop"
+
+
+def _detect_source(src: str | None, referrer: str | None) -> str | None:
+    if src:
+        return src
+    if not referrer:
+        return None
+    try:
+        domain = urlparse(referrer).netloc.lower().replace("www.", "")
+    except Exception:
+        return None
+    if "google" in domain:
+        return "Google"
+    if "facebook" in domain or "instagram" in domain or "fb.com" in domain:
+        return "Facebook"
+    if "twitter" in domain or "t.co" in domain or "x.com" in domain:
+        return "Twitter/X"
+    if "bing" in domain:
+        return "Bing"
+    if "youtube" in domain:
+        return "YouTube"
+    if "whatsapp" in domain:
+        return "WhatsApp"
+    if domain:
+        return domain
+    return None
+
+
 @router.get("/go/{identifier}")
 def go(
     identifier: str,
@@ -490,16 +536,20 @@ def go(
     if recent_click:
         return RedirectResponse(item.external_url, status_code=302)
 
+    ua_header = request.headers.get("user-agent")
+    ref_header = request.headers.get("referer")
+
     click = ClickEvent(
         ad_id=item.id,
-        source=src,
+        source=_detect_source(src, ref_header),
         subsource=grp,
         campaign=camp,
         creative=ad,
         source_type=source,
         source_ref=ref,
-        referrer=request.headers.get("referer"),
-        user_agent=request.headers.get("user-agent"),
+        referrer=ref_header,
+        user_agent=ua_header,
+        device=_detect_device(ua_header),
         ip_hash=masked_ip,
     )
 

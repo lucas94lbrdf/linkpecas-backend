@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 from datetime import datetime
@@ -7,7 +8,7 @@ from slowapi.util import get_ipaddr
 import redis
 
 # Configuração do Redis para o Limiter e as estatísticas
-redis_url = "redis://redis:6379"
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
 
 logger = logging.getLogger("rate_limiter")
@@ -24,7 +25,8 @@ def get_remote_address(request: Request) -> str:
 limiter = Limiter(
     key_func=get_remote_address,
     storage_uri=redis_url,
-    default_limits=["60/minute"]
+    default_limits=["60/minute"],
+    swallow_errors=True
 )
 
 def log_rate_limit_exceeded(ip: str, route: str):

@@ -21,7 +21,7 @@ from fastapi import WebSocket
 
 logger = logging.getLogger("websocket_manager")
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/")
 
 # Canal global para broadcast
 BROADCAST_CHANNEL = "notif:*"

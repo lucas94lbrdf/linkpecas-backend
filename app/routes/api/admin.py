@@ -547,15 +547,19 @@ def get_advanced_analytics(db: Session = Depends(get_db)):
     # 3. CTR Global
     ctr = (total_clicks / total_views * 100) if total_views > 0 else 0
     
-    # 4. Volume de Cliques (últimos 7 dias)
+    # 4. Volume de Cliques (últimos 7 dias) — preenche todos os 7 dias inclusive os sem cliques
     seven_days_ago = datetime.utcnow() - timedelta(days=7)
     clicks_history = db.query(
         func.date(ClickEvent.clicked_at).label('day'),
         func.count(ClickEvent.id).label('value')
     ).filter(ClickEvent.clicked_at >= seven_days_ago)\
      .group_by('day').order_by('day').all()
-    
-    revenue_data = [{"day": str(r[0]), "value": r[1]} for r in clicks_history]
+
+    clicks_map = {r[0]: r[1] for r in clicks_history}
+    revenue_data = []
+    for i in range(6, -1, -1):
+        d = (datetime.utcnow() - timedelta(days=i)).date()
+        revenue_data.append({"day": d.strftime("%d/%m"), "value": clicks_map.get(d, 0)})
 
     # 5. Distribuição de Dispositivos
     devices_query = db.query(
@@ -625,6 +629,44 @@ def get_advanced_analytics(db: Session = Depends(get_db)):
         "detailed_metrics": detailed_metrics,
         "total_items": len(detailed_metrics)
     }
+
+
+@router.get("/analytics/hourly")
+def get_hourly_analytics(
+    period: str = Query(default="7d"),
+    db: Session = Depends(get_db),
+):
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if period == "today":
+        start, end = today_start, None
+    elif period == "yesterday":
+        start = today_start - timedelta(days=1)
+        end = today_start
+    elif period == "3d":
+        start, end = now - timedelta(days=3), None
+    elif period == "10d":
+        start, end = now - timedelta(days=10), None
+    elif period == "15d":
+        start, end = now - timedelta(days=15), None
+    elif period == "30d":
+        start, end = now - timedelta(days=30), None
+    else:  # default 7d
+        start, end = now - timedelta(days=7), None
+
+    q = db.query(
+        func.extract('hour', ClickEvent.clicked_at).label('hour'),
+        func.count(ClickEvent.id).label('visits')
+    ).filter(ClickEvent.clicked_at >= start)
+
+    if end:
+        q = q.filter(ClickEvent.clicked_at < end)
+
+    rows = q.group_by('hour').order_by('hour').all()
+    hourly_map = {int(r[0]): r[1] for r in rows}
+    return [{"hour": f"{h:02d}h", "visits": hourly_map.get(h, 0)} for h in range(24)]
+
 
 # --- LOGS ---
 
@@ -795,6 +837,46 @@ def get_clicks_detailed(
     }
 
 
+@router.get("/clicks")
+def get_ad_clicks(
+    ad_id: str = Query(...),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Retorna histórico de ClickEvents para um anúncio específico."""
+    try:
+        from uuid import UUID
+        ad_uuid = UUID(ad_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ad_id inválido")
+
+    total = db.query(ClickEvent).filter(ClickEvent.ad_id == ad_uuid).count()
+    events = (
+        db.query(ClickEvent)
+        .filter(ClickEvent.ad_id == ad_uuid)
+        .order_by(ClickEvent.clicked_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "total": total,
+        "clicks": [
+            {
+                "clicked_at": c.clicked_at.isoformat() if c.clicked_at else None,
+                "source":     c.source,
+                "device":     c.device,
+                "campaign":   c.campaign,
+                "city":       c.city,
+                "state":      c.state,
+                "referrer":   c.referrer,
+                "ip_hash":    (c.ip_hash[:8] + "...") if c.ip_hash and len(c.ip_hash) > 8 else c.ip_hash,
+            }
+            for c in events
+        ],
+    }
+
+
 # --- PLANOS ---
 
 @router.get("/plans")
@@ -814,7 +896,9 @@ def get_rate_limit_stats():
     from datetime import datetime
     
     # Conecta no Redis
-    redis_client = redis.Redis.from_url("redis://redis:6379", decode_responses=True)
+    import os
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
     today = datetime.utcnow().strftime('%Y-%m-%d')
     
     try:

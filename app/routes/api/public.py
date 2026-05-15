@@ -14,6 +14,7 @@ from app.models.user import User
 from app.models.vehicle import Manufacturer, VehicleModel
 from app.models.setting import SystemSetting
 from app.utils.activity import _get_device, _get_location
+from app.utils.tracking import enrich_request
 from app.core.rate_limit import limiter
 from app.services.search_service import search_ads as meili_search
 
@@ -383,14 +384,12 @@ def register_click(identifier: str, data: ClickRequest, request: Request, db: Se
             ad = None
 
     if ad:
-        # Trava anti-spam: 10 segundos por IP
-        ip = request.client.host if request.client else "unknown"
-        import hashlib
-        masked_ip = hashlib.sha256(ip.encode()).hexdigest()[:16]
+        meta = enrich_request(request, body_url=data.url)
 
+        # Trava anti-spam: 10 segundos por IP
         recent_click = db.query(ClickEvent).filter(
             ClickEvent.ad_id == ad.id,
-            ClickEvent.ip_hash == masked_ip,
+            ClickEvent.ip_hash == meta["ip_hash"],
             ClickEvent.clicked_at >= datetime.utcnow() - timedelta(seconds=10)
         ).first()
 
@@ -399,9 +398,6 @@ def register_click(identifier: str, data: ClickRequest, request: Request, db: Se
 
         ad.clicks_count = (ad.clicks_count or 0) + 1
 
-        ua = request.headers.get("user-agent", "")
-        referer = request.headers.get("referer", "")
-
         click = ClickEvent(
             id=uuid.uuid4(),
             ad_id=ad.id,
@@ -409,21 +405,32 @@ def register_click(identifier: str, data: ClickRequest, request: Request, db: Se
             external_url=data.url or ad.external_url,
             source_type=data.source_type,
             source_ref=data.source_ref,
-            referrer=referer,
-            user_agent=ua,
-            device=_get_device(ua),
-            ip_hash=masked_ip,
+            source=meta["source_category"],
+            source_category=meta["source_category"],
+            utm_source=meta["utm_source"],
+            utm_medium=meta["utm_medium"],
+            utm_campaign=meta["utm_campaign"],
+            referrer=meta["referrer"],
+            user_agent=meta["user_agent"],
+            device=_get_device(meta["user_agent"]),
+            browser=meta["browser"],
+            os=meta["os"],
+            ip_address=meta["ip_address"],
+            ip_hash=meta["ip_hash"],
         )
         db.add(click)
         db.commit()
 
         try:
-            loc = _get_location(ip)
+            loc = _get_location(meta["ip_address"])
             if loc and loc != "Local":
                 parts = [p.strip() for p in loc.split(",")]
-                if len(parts) >= 2:
+                if len(parts) >= 1:
                     click.city = parts[0]
-                    click.state = parts[1] if len(parts) > 1 else None
+                if len(parts) >= 2:
+                    click.state = parts[1]
+                if len(parts) >= 3:
+                    click.country = parts[2]
                 db.commit()
         except Exception:
             pass
@@ -496,22 +503,44 @@ class SearchLogSchema(BaseModel):
     results_found: int = 0
 
 @router.post("/logs/searches")
-def log_search(data: SearchLogSchema, db: Session = Depends(get_db)):
+def log_search(data: SearchLogSchema, request: Request, db: Session = Depends(get_db)):
     from app.models.search_log import SearchLog
-    
+
     # Não salva se for vazio
     if not data.term and not data.vehicle_context:
         return {"status": "ignored"}
-        
+
+    meta = enrich_request(request)
+
     log = SearchLog(
         term=data.term,
         vehicle_context=data.vehicle_context,
         origin=data.origin,
-        results_found=data.results_found
+        results_found=data.results_found,
+        source_category=meta["source_category"],
+        referrer=meta["referrer"],
+        user_agent=meta["user_agent"],
+        device=_get_device(meta["user_agent"]),
+        browser=meta["browser"],
+        os=meta["os"],
+        ip_address=meta["ip_address"],
+        ip_hash=meta["ip_hash"],
     )
     db.add(log)
     db.commit()
-    
+
+    try:
+        loc = _get_location(meta["ip_address"])
+        if loc and loc != "Local":
+            parts = [p.strip() for p in loc.split(",")]
+            if len(parts) >= 1:
+                log.city = parts[0]
+            if len(parts) >= 2:
+                log.state = parts[1]
+            db.commit()
+    except Exception:
+        pass
+
     return {"status": "ok"}
 
  

@@ -25,28 +25,45 @@ logger = logging.getLogger("link_health")
 router = APIRouter(dependencies=[Depends(get_admin_user)])
 
 
+def _ad_base_query(db: Session, marketplace: Optional[str] = None):
+    q = db.query(Ad).filter(Ad.external_url.isnot(None), Ad.external_url != "")
+    if marketplace:
+        q = q.filter(Ad.marketplace == marketplace)
+    return q
+
+
 # ─── a) Summary ─────────────────────────────────────────────────────────────────
 
 @router.get("/summary")
-def get_link_health_summary(db: Session = Depends(get_db)):
+def get_link_health_summary(
+    marketplace: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """Resumo geral da saúde dos links: totais, taxa de saúde, duração média."""
-    base_q = db.query(Ad).filter(
-        Ad.external_url.isnot(None),
-        Ad.external_url != ""
-    )
+    base_q = _ad_base_query(db, marketplace)
 
     total_monitored = base_q.count()
-    total_available = base_q.filter(Ad.link_status == "active").count()
+    total_available = base_q.filter(
+        (Ad.link_status == "active") | (Ad.link_status.is_(None))
+    ).count()
     total_unavailable = base_q.filter(Ad.link_status == "unavailable").count()
     total_error = base_q.filter(Ad.link_status == "error").count()
-    total_pending = base_q.filter(Ad.link_status == "pending_review").count()
+    total_pending = base_q.filter(
+        Ad.link_status == "pending_review"
+    ).count()
 
-    health_rate = round((total_available / total_monitored) * 100, 1) if total_monitored > 0 else 0.0
+    # Saúde considera ativos sobre o que já foi verificado (active+unavailable+error).
+    verified = total_available + total_unavailable + total_error
+    health_rate = round((total_available / verified) * 100, 1) if verified > 0 else 0.0
 
-    avg_duration = db.query(func.avg(LinkCheck.check_duration_ms)).scalar()
+    dur_q = db.query(func.avg(LinkCheck.check_duration_ms))
+    last_q = db.query(func.max(LinkCheck.checked_at))
+    if marketplace:
+        dur_q = dur_q.filter(LinkCheck.marketplace == marketplace)
+        last_q = last_q.filter(LinkCheck.marketplace == marketplace)
+    avg_duration = dur_q.scalar()
     avg_check_duration_ms = round(float(avg_duration), 1) if avg_duration else 0.0
-
-    last_check = db.query(func.max(LinkCheck.checked_at)).scalar()
+    last_check = last_q.scalar()
 
     # Refresh Prometheus gauges
     try:
@@ -64,39 +81,49 @@ def get_link_health_summary(db: Session = Depends(get_db)):
         "health_rate": health_rate,
         "avg_check_duration_ms": avg_check_duration_ms,
         "last_full_check_at": last_check.isoformat() if last_check else None,
+        "marketplace": marketplace,
     }
 
 
 # ─── b) By Marketplace ──────────────────────────────────────────────────────────
 
 @router.get("/by-marketplace")
-def get_link_health_by_marketplace(db: Session = Depends(get_db)):
+def get_link_health_by_marketplace(
+    marketplace: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """Distribuição de saúde agrupada por marketplace."""
-    rows = (
+    q = (
         db.query(
             Ad.marketplace,
             func.count(Ad.id).label("total"),
-            func.sum(case((Ad.link_status == "active", 1), else_=0)).label("available"),
+            func.sum(case(((Ad.link_status == "active") | (Ad.link_status.is_(None)), 1), else_=0)).label("available"),
             func.sum(case((Ad.link_status == "unavailable", 1), else_=0)).label("unavailable"),
             func.sum(case((Ad.link_status == "error", 1), else_=0)).label("error"),
+            func.sum(case((Ad.link_status == "pending_review", 1), else_=0)).label("pending"),
         )
         .filter(Ad.external_url.isnot(None), Ad.external_url != "")
         .group_by(Ad.marketplace)
         .order_by(desc("total"))
-        .all()
     )
+    if marketplace:
+        q = q.filter(Ad.marketplace == marketplace)
 
-    return [
-        {
+    rows = q.all()
+
+    out = []
+    for r in rows:
+        verified = int(r.available or 0) + int(r.unavailable or 0) + int(r.error or 0)
+        out.append({
             "marketplace": r.marketplace or "Desconhecido",
-            "total": r.total,
-            "available": r.available,
-            "unavailable": r.unavailable,
-            "error": r.error,
-            "health_rate": round((r.available / r.total) * 100, 1) if r.total > 0 else 0.0,
-        }
-        for r in rows
-    ]
+            "total": int(r.total or 0),
+            "available": int(r.available or 0),
+            "unavailable": int(r.unavailable or 0),
+            "error": int(r.error or 0),
+            "pending": int(r.pending or 0),
+            "health_rate": round((int(r.available or 0) / verified) * 100, 1) if verified > 0 else 0.0,
+        })
+    return out
 
 
 # ─── c) Trend ────────────────────────────────────────────────────────────────────
@@ -104,20 +131,17 @@ def get_link_health_by_marketplace(db: Session = Depends(get_db)):
 @router.get("/trend")
 def get_link_health_trend(
     period: str = Query(default="30d", pattern=r"^\d+[dw]$"),
+    marketplace: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Série temporal de disponibilidade, agrupada por dia."""
-    # Parse period
     unit = period[-1]
     amount = int(period[:-1])
-    if unit == "w":
-        days = amount * 7
-    else:
-        days = amount
+    days = amount * 7 if unit == "w" else amount
 
     since = datetime.utcnow() - timedelta(days=days)
 
-    rows = (
+    q = (
         db.query(
             cast(LinkCheck.checked_at, Date).label("date"),
             func.count(LinkCheck.id).label("total_checks"),
@@ -127,16 +151,18 @@ def get_link_health_trend(
         .filter(LinkCheck.checked_at >= since)
         .group_by(cast(LinkCheck.checked_at, Date))
         .order_by(cast(LinkCheck.checked_at, Date))
-        .all()
     )
+    if marketplace:
+        q = q.filter(LinkCheck.marketplace == marketplace)
 
+    rows = q.all()
     return [
         {
             "date": str(r.date),
-            "total_checks": r.total_checks,
-            "available_count": r.available_count,
-            "unavailable_count": r.unavailable_count,
-            "health_rate": round((r.available_count / r.total_checks) * 100, 1) if r.total_checks > 0 else 0.0,
+            "total_checks": int(r.total_checks or 0),
+            "available_count": int(r.available_count or 0),
+            "unavailable_count": int(r.unavailable_count or 0),
+            "health_rate": round((int(r.available_count or 0) / int(r.total_checks or 1)) * 100, 1) if r.total_checks else 0.0,
         }
         for r in rows
     ]
@@ -147,20 +173,21 @@ def get_link_health_trend(
 @router.get("/recent-deactivations")
 def get_recent_deactivations(
     limit: int = Query(default=20, ge=1, le=100),
+    marketplace: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Últimas desativações automáticas por link indisponível."""
-    rows = (
+    q = (
         db.query(LinkCheck, Ad, User)
         .join(Ad, LinkCheck.ad_id == Ad.id)
         .outerjoin(User, Ad.user_id == User.id)
         .filter(LinkCheck.is_available == False)
         .order_by(desc(LinkCheck.checked_at))
-        .limit(limit)
-        .all()
     )
+    if marketplace:
+        q = q.filter(Ad.marketplace == marketplace)
+    rows = q.limit(limit * 3).all()  # buffer pra deduplicar abaixo
 
-    # Deduplica por ad_id (mostra só a última desativação de cada anúncio)
     seen = set()
     results = []
     for check, ad, user in rows:
@@ -168,7 +195,6 @@ def get_recent_deactivations(
             continue
         seen.add(str(ad.id))
 
-        # Determina motivo a partir dos sinais
         signals = check.signals_json or {}
         if signals.get("http_404"):
             reason = "Erro 404"
@@ -190,6 +216,8 @@ def get_recent_deactivations(
             "http_status": check.http_status,
             "deactivated_at": check.checked_at.isoformat() if check.checked_at else None,
         })
+        if len(results) >= limit:
+            break
 
     return results
 
@@ -199,10 +227,11 @@ def get_recent_deactivations(
 @router.get("/worst-shops")
 def get_worst_shops(
     limit: int = Query(default=10, ge=1, le=50),
+    marketplace: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Top lojistas com mais links quebrados."""
-    rows = (
+    q = (
         db.query(
             User.id.label("shop_id"),
             func.coalesce(User.shop_name, User.name).label("shop_name"),
@@ -215,18 +244,19 @@ def get_worst_shops(
         .having(func.sum(case((Ad.link_status == "unavailable", 1), else_=0)) > 0)
         .order_by(desc("broken_links"))
         .limit(limit)
-        .all()
     )
+    if marketplace:
+        q = q.filter(Ad.marketplace == marketplace)
 
     return [
         {
             "shop_id": str(r.shop_id),
             "shop_name": r.shop_name or "Sem Nome",
-            "total_ads": r.total_ads,
-            "broken_links": r.broken_links,
-            "broken_rate": round((r.broken_links / r.total_ads) * 100, 1) if r.total_ads > 0 else 0.0,
+            "total_ads": int(r.total_ads or 0),
+            "broken_links": int(r.broken_links or 0),
+            "broken_rate": round((int(r.broken_links or 0) / int(r.total_ads or 1)) * 100, 1) if r.total_ads else 0.0,
         }
-        for r in rows
+        for r in q.all()
     ]
 
 
@@ -276,27 +306,28 @@ def get_check_history(
 # ─── Force Check ─────────────────────────────────────────────────────────────────
 
 @router.post("/force-check")
-def force_check_all_links(db: Session = Depends(get_db)):
+def force_check_all_links(
+    marketplace: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """Admin força verificação completa de todos os links fora do horário agendado."""
-    count = (
-        db.query(Ad)
-        .filter(
-            Ad.external_url.isnot(None),
-            Ad.external_url != "",
-        )
-        .count()
-    )
+    q = db.query(Ad).filter(Ad.external_url.isnot(None), Ad.external_url != "")
+    if marketplace:
+        q = q.filter(Ad.marketplace == marketplace)
+    count = q.count()
 
     if count == 0:
         return {"queued_checks": 0, "estimated_time_minutes": 0}
 
-    # Dispara a task Celery assíncrona
-    check_all_active_links.delay()
+    if marketplace:
+        # Enfileira apenas os anúncios filtrados
+        for ad in q.all():
+            check_single_link.delay(str(ad.id), ad.external_url)
+    else:
+        check_all_active_links.delay()
 
-    # Estimativa: ~2s por link (delay + request + parse)
     estimated_minutes = max(1, round((count * 2) / 60))
-
-    logger.info(f"Admin forçou verificação de {count} links. ETA: {estimated_minutes}min")
+    logger.info(f"Admin forçou verificação de {count} links (marketplace={marketplace}). ETA: {estimated_minutes}min")
 
     return {
         "queued_checks": count,

@@ -42,6 +42,31 @@ services:
     volumes:
       - meilisearch_data:/meili_data
 
+  # ==========================================
+  # EVOLUTION API - O MOTOR DO WHATSAPP
+  # ==========================================
+  evolution_api:
+    image: atendai/evolution-api:v2.1.1
+    container_name: linkpecas_evolution
+    restart: always
+    ports:
+      - "8081:8080"
+    environment:
+      - SERVER_URL=http://localhost:8081
+      - AUTHENTICATE=true
+      - AUTHENTICATION_API_KEY=mude_para_uma_senha_forte_aqui # <-- CRIE UMA SENHA AQUI
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://postgres:postgres@db:5432/linkpecas
+      - REDIS_URI=redis://redis:6379/1 
+      - WEBHOOK_GLOBAL_URL=https://api.linkpecas.online/api/webhooks/whatsapp
+      - WEBHOOK_GLOBAL_ENABLED=true
+      - WEBHOOK_GLOBAL_EVENTS=MESSAGES_UPSERT
+    volumes:
+      - ./evolution_instances:/evolution/instances
+    depends_on:
+      - db
+      - redis
+
   nginx:
     image: nginx:alpine
     container_name: linkpecas_nginx

@@ -536,124 +536,184 @@ def delete_model(model_id: str, db: Session = Depends(get_db)):
 
 # --- ANALYTICS V2 ---
 
+# Fuso horário usado para agrupar cliques por "dia" (mantém consistência BRT no painel).
+BR_TZ_OFFSET_HOURS = -3
+_PERIOD_DAYS = {"today": 1, "yesterday": 2, "3d": 3, "7d": 7, "10d": 10, "15d": 15, "30d": 30, "90d": 90}
+
+
+def _period_to_days(period: str, default: int = 30) -> int:
+    return _PERIOD_DAYS.get(period, default)
+
+
+def _br_date(dt: datetime):
+    """Converte um datetime UTC para a data correspondente em horário de Brasília."""
+    return (dt + timedelta(hours=BR_TZ_OFFSET_HOURS)).date()
+
+
 @router.get("/analytics/v2")
-def get_advanced_analytics(db: Session = Depends(get_db)):
-    # 1. Cliques Totais
-    total_clicks = db.query(ClickEvent).count()
-    
-    # 2. Visualizações Totais (Soma de views_count de todos os Ads)
-    total_views = db.query(func.sum(Ad.views_count)).scalar() or 0
-    
-    # 3. CTR Global
-    ctr = (total_clicks / total_views * 100) if total_views > 0 else 0
-    
-    # 4. Volume de Cliques (últimos 7 dias) — preenche todos os 7 dias inclusive os sem cliques
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    clicks_history = db.query(
-        func.date(ClickEvent.clicked_at).label('day'),
-        func.count(ClickEvent.id).label('value')
-    ).filter(ClickEvent.clicked_at >= seven_days_ago)\
-     .group_by('day').order_by('day').all()
+def get_advanced_analytics(
+    period: str = Query(default="30d"),
+    marketplace: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    days = _period_to_days(period, 30)
+    now_utc = datetime.utcnow()
+    since_utc = now_utc - timedelta(days=days)
 
-    clicks_map = {r[0]: r[1] for r in clicks_history}
+    # Filtros base reutilizados
+    base_filters = [ClickEvent.clicked_at >= since_utc]
+    if marketplace:
+        base_filters.append(ClickEvent.marketplace == marketplace)
+
+    # 1. Cliques no período + total geral
+    period_clicks = db.query(func.count(ClickEvent.id)).filter(*base_filters).scalar() or 0
+    total_clicks_all_time = db.query(func.count(ClickEvent.id)).scalar() or 0
+
+    # 2. Views do período (proxy: somatório dos ads do marketplace, se filtrado)
+    views_q = db.query(func.sum(Ad.views_count))
+    if marketplace:
+        views_q = views_q.filter(Ad.marketplace == marketplace)
+    total_views = views_q.scalar() or 0
+
+    # 3. CTR
+    ctr = (period_clicks / total_views * 100) if total_views > 0 else 0
+
+    # 4. Série de cliques por dia em BRT, preenchendo dias vazios.
+    # Buscamos clicked_at e agrupamos em Python para aplicar offset BRT (cross-DB).
+    rows = db.query(ClickEvent.clicked_at).filter(*base_filters).all()
+    clicks_map: dict = {}
+    for (ts,) in rows:
+        if ts is None:
+            continue
+        d = _br_date(ts)
+        clicks_map[d] = clicks_map.get(d, 0) + 1
+
     revenue_data = []
-    for i in range(6, -1, -1):
-        d = (datetime.utcnow() - timedelta(days=i)).date()
-        revenue_data.append({"day": d.strftime("%d/%m"), "value": clicks_map.get(d, 0)})
+    today_br = _br_date(now_utc)
+    for i in range(days - 1, -1, -1):
+        d = today_br - timedelta(days=i)
+        revenue_data.append({
+            "day": d.strftime("%d/%m"),
+            "date": d.isoformat(),
+            "value": clicks_map.get(d, 0),
+        })
 
-    # 5. Distribuição de Dispositivos
+    # 5. Dispositivos (no período)
     devices_query = db.query(
         ClickEvent.device,
         func.count(ClickEvent.id).label('value')
-    ).group_by(ClickEvent.device).all()
-    
+    ).filter(*base_filters).group_by(ClickEvent.device).all()
     total_devices = sum(r[1] for r in devices_query)
-    devices = [{"name": (r[0] or "Desconhecido").capitalize(), "value": round((r[1]/total_devices*100), 1) if total_devices > 0 else 0} for r in devices_query]
+    devices = [
+        {"name": (r[0] or "Desconhecido").capitalize(),
+         "value": round((r[1] / total_devices * 100), 1) if total_devices > 0 else 0,
+         "count": int(r[1])}
+        for r in devices_query
+    ]
 
-    # 6. Origem do Tráfego
+    # 6. Origem do tráfego — usa source_category quando disponível, senão source
+    source_col = func.coalesce(ClickEvent.source_category, ClickEvent.source)
     sources_query = db.query(
-        ClickEvent.source,
+        source_col.label('src'),
         func.count(ClickEvent.id).label('value')
-    ).group_by(ClickEvent.source).order_by(desc('value')).limit(5).all()
-    
-    sources = [{"name": r[0] or "Direto", "value": round((r[1]/total_clicks*100), 1) if total_clicks > 0 else 0} for r in sources_query]
+    ).filter(*base_filters).group_by(source_col).order_by(desc('value')).limit(8).all()
+    sources = [
+        {"name": (r[0] or "Direto").capitalize(),
+         "value": round((r[1] / period_clicks * 100), 1) if period_clicks > 0 else 0,
+         "count": int(r[1])}
+        for r in sources_query
+    ]
 
-    # 7. Atividade por Horário (Pico)
+    # 7. Atividade por horário (do período) — extract('hour') em UTC; ajuste BRT no Python
     hourly_query = db.query(
         func.extract('hour', ClickEvent.clicked_at).label('hour'),
         func.count(ClickEvent.id).label('visits')
-    ).group_by('hour').order_by('hour').all()
-    
-    # Garantir que temos todas as 24 horas
-    hourly_map = {int(r[0]): r[1] for r in hourly_query}
+    ).filter(*base_filters).group_by('hour').all()
+    hourly_map: dict = {}
+    for r in hourly_query:
+        h_brt = (int(r[0]) + BR_TZ_OFFSET_HOURS) % 24
+        hourly_map[h_brt] = hourly_map.get(h_brt, 0) + int(r[1])
     hourly_data = [{"hour": f"{h:02d}h", "visits": hourly_map.get(h, 0)} for h in range(24)]
 
-    # 8. Top Lojas (Baseado em cliques acumulados)
-    top_stores_query = db.query(
-        User.shop_name,
-        func.sum(Ad.clicks_count).label('total_clicks')
-    ).join(Ad, User.id == Ad.user_id)\
-     .group_by(User.shop_name)\
-     .order_by(desc('total_clicks'))\
-     .limit(5).all()
-    
-    top_stores = [{"name": r[0] or "Loja Sem Nome", "clicks": int(r[1] or 0), "growth": 12} for r in top_stores_query]
+    # 8. Top lojas (do período)
+    stores_q = (
+        db.query(
+            User.shop_name,
+            func.count(ClickEvent.id).label('total_clicks')
+        )
+        .join(Ad, User.id == Ad.user_id)
+        .join(ClickEvent, ClickEvent.ad_id == Ad.id)
+        .filter(*base_filters)
+        .group_by(User.shop_name)
+        .order_by(desc('total_clicks'))
+        .limit(5)
+    )
+    top_stores = [
+        {"name": r[0] or "Loja Sem Nome", "clicks": int(r[1] or 0), "growth": 0}
+        for r in stores_q.all()
+    ]
 
-    # 9. Métricas Detalhadas (Top Produtos)
-    top_products_query = db.query(
-        Ad.title,
-        User.shop_name,
-        Ad.views_count,
-        Ad.clicks_count
-    ).join(User, Ad.user_id == User.id)\
-     .order_by(desc(Ad.clicks_count))\
-     .limit(10).all()
-    
+    # 9. Top produtos (do período)
+    prods_q = (
+        db.query(
+            Ad.title,
+            User.shop_name,
+            Ad.views_count,
+            func.count(ClickEvent.id).label('period_clicks')
+        )
+        .join(User, Ad.user_id == User.id)
+        .join(ClickEvent, ClickEvent.ad_id == Ad.id)
+        .filter(*base_filters)
+        .group_by(Ad.id, Ad.title, User.shop_name, Ad.views_count)
+        .order_by(desc('period_clicks'))
+        .limit(10)
+    )
     detailed_metrics = [{
         "title": r[0],
         "shop_name": r[1],
-        "visits": r[2],
-        "clicks": r[3],
-        "conv_rate": round((r[3] / r[2] * 100), 1) if r[2] > 0 else 0
-    } for r in top_products_query]
+        "visits": r[2] or 0,
+        "clicks": int(r[3] or 0),
+        "conv_rate": round((int(r[3] or 0) / r[2] * 100), 1) if (r[2] or 0) > 0 else 0
+    } for r in prods_q.all()]
 
     return {
-        "total_sessions": f"{total_clicks / 1000:.1f}K" if total_clicks >= 1000 else str(total_clicks),
+        "period": period,
+        "period_days": days,
+        "marketplace": marketplace,
+        "period_clicks": int(period_clicks),
+        "total_clicks_all_time": int(total_clicks_all_time),
+        "total_sessions": f"{period_clicks / 1000:.1f}K" if period_clicks >= 1000 else str(period_clicks),
         "ctr": round(ctr, 2),
-        "conversion": 4.5, # Exemplo fixo por enquanto
+        "conversion": 4.5,  # placeholder
         "revenue": revenue_data,
         "devices": devices,
         "sources": sources,
         "hourly": hourly_data,
         "top_stores": top_stores,
         "detailed_metrics": detailed_metrics,
-        "total_items": len(detailed_metrics)
+        "total_items": len(detailed_metrics),
     }
 
 
 @router.get("/analytics/hourly")
 def get_hourly_analytics(
     period: str = Query(default="7d"),
+    marketplace: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     now = datetime.utcnow()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Janela em BRT: "hoje" começa à 00:00 BRT, que em UTC equivale a hoje BRT 00 → +3h UTC
+    today_brt = _br_date(now)
+    today_start_utc = datetime(today_brt.year, today_brt.month, today_brt.day) - timedelta(hours=BR_TZ_OFFSET_HOURS)
 
     if period == "today":
-        start, end = today_start, None
+        start, end = today_start_utc, None
     elif period == "yesterday":
-        start = today_start - timedelta(days=1)
-        end = today_start
-    elif period == "3d":
-        start, end = now - timedelta(days=3), None
-    elif period == "10d":
-        start, end = now - timedelta(days=10), None
-    elif period == "15d":
-        start, end = now - timedelta(days=15), None
-    elif period == "30d":
-        start, end = now - timedelta(days=30), None
-    else:  # default 7d
-        start, end = now - timedelta(days=7), None
+        start = today_start_utc - timedelta(days=1)
+        end = today_start_utc
+    else:
+        days = _period_to_days(period, 7)
+        start, end = now - timedelta(days=days), None
 
     q = db.query(
         func.extract('hour', ClickEvent.clicked_at).label('hour'),
@@ -662,10 +722,94 @@ def get_hourly_analytics(
 
     if end:
         q = q.filter(ClickEvent.clicked_at < end)
+    if marketplace:
+        q = q.filter(ClickEvent.marketplace == marketplace)
 
-    rows = q.group_by('hour').order_by('hour').all()
-    hourly_map = {int(r[0]): r[1] for r in rows}
+    rows = q.group_by('hour').all()
+    hourly_map: dict = {}
+    for r in rows:
+        h_brt = (int(r[0]) + BR_TZ_OFFSET_HOURS) % 24
+        hourly_map[h_brt] = hourly_map.get(h_brt, 0) + int(r[1])
     return [{"hour": f"{h:02d}h", "visits": hourly_map.get(h, 0)} for h in range(24)]
+
+
+@router.get("/analytics/click-events")
+def list_click_events(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    period: str = Query(default="30d"),
+    marketplace: Optional[str] = Query(default=None),
+    device: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
+    ad_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Lista cliques individuais com IP, dispositivo, origem, navegador, geo e horário.
+
+    Alimenta o card "Cliques Recentes" do painel admin para auditoria.
+    """
+    days = _period_to_days(period, 30)
+    since = datetime.utcnow() - timedelta(days=days)
+
+    q = (
+        db.query(ClickEvent, Ad, User)
+        .outerjoin(Ad, ClickEvent.ad_id == Ad.id)
+        .outerjoin(User, Ad.user_id == User.id)
+        .filter(ClickEvent.clicked_at >= since)
+    )
+
+    if marketplace:
+        q = q.filter(ClickEvent.marketplace == marketplace)
+    if device:
+        q = q.filter(ClickEvent.device == device)
+    if source:
+        q = q.filter(func.coalesce(ClickEvent.source_category, ClickEvent.source) == source)
+    if ad_id:
+        try:
+            import uuid as _uuid
+            q = q.filter(ClickEvent.ad_id == _uuid.UUID(ad_id))
+        except (ValueError, AttributeError):
+            pass
+
+    total = q.count()
+    q = q.order_by(desc(ClickEvent.clicked_at)).offset((page - 1) * limit).limit(limit)
+
+    results = []
+    for click, ad, user in q.all():
+        results.append({
+            "id": str(click.id),
+            "clicked_at": click.clicked_at.isoformat() if click.clicked_at else None,
+            "ad_id": str(click.ad_id) if click.ad_id else None,
+            "ad_title": ad.title if ad else "—",
+            "ad_slug": ad.slug if ad else None,
+            "shop_name": (user.shop_name or user.name) if user else "—",
+            "marketplace": click.marketplace,
+            "external_url": click.external_url,
+            "source": click.source_category or click.source or "direct",
+            "source_type": click.source_type,
+            "source_ref": click.source_ref,
+            "utm_source": click.utm_source,
+            "utm_medium": click.utm_medium,
+            "utm_campaign": click.utm_campaign,
+            "referrer": click.referrer,
+            "device": click.device,
+            "browser": click.browser,
+            "os": click.os,
+            "city": click.city,
+            "state": click.state,
+            "country": click.country,
+            "ip_address": click.ip_address,
+            "ip_hash": click.ip_hash,
+        })
+
+    return {
+        "data": results,
+        "total": int(total),
+        "page": page,
+        "pages": max(1, (int(total) + limit - 1) // limit),
+        "limit": limit,
+        "period": period,
+    }
 
 
 # --- LOGS ---
@@ -821,11 +965,18 @@ def get_clicks_detailed(
             # dados do último clique (quando disponível)
             "last_click_at": lc.clicked_at.isoformat() if lc and lc.clicked_at else None,
             "last_device":   lc.device if lc else None,
+            "last_browser":  lc.browser if lc else None,
+            "last_os":       lc.os if lc else None,
             "last_city":     lc.city if lc else None,
             "last_state":    lc.state if lc else None,
-            "last_source":   lc.source if lc else None,
+            "last_country":  lc.country if lc else None,
+            "last_source":   (lc.source_category or lc.source) if lc else None,
             "last_referrer": lc.referrer if lc else None,
-            "last_ip":       (lc.ip_hash[:12] + "...") if lc and lc.ip_hash and len(lc.ip_hash) > 12 else (lc.ip_hash if lc else None),
+            "last_ip":       lc.ip_address if lc else None,
+            "last_ip_hash":  lc.ip_hash if lc else None,
+            "last_utm_source":   lc.utm_source if lc else None,
+            "last_utm_medium":   lc.utm_medium if lc else None,
+            "last_utm_campaign": lc.utm_campaign if lc else None,
         })
 
     return {

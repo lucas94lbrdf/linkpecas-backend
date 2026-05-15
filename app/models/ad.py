@@ -60,7 +60,7 @@ class Ad(Base):
     image_urls = Column(JSON, nullable=True)
     external_url = Column(Text, nullable=False)
     last_link_check_at = Column(DateTime, nullable=True)
-    link_status = Column(String(20), default="pending_review") # active, unavailable, error, pending_review
+    link_status = Column(String(20), default="active") # active, unavailable, error, pending_review
     condition = Column(String(20), default="new") # new, used
     warranty = Column(String(100), nullable=True)
     free_shipping = Column(Boolean, default=False)

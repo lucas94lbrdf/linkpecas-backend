@@ -21,10 +21,10 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True
 )
 
-# Optional config for beat schedule if needed
+# Beat schedule
 celery_app.conf.beat_schedule = {
-    'check-all-links-every-day': {
+    'check-all-links-every-6h': {
         'task': 'app.tasks.link_checker_tasks.check_all_active_links',
-        'schedule': 86400.0, # Every 24 hours
+        'schedule': 6 * 60 * 60.0,  # a cada 6 horas
     },
 }

@@ -227,21 +227,65 @@ def get_communities_performance(
 
 @router.get("/top-demands")
 def get_top_demands(
+    period: str = "30d",
+    limit: int = 25,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Acesso restrito")
-        
+
     from app.models.search_log import SearchLog
-    
-    # Buscas mais frequentes onde não houve resultados (demanda reprimida)
-    data = db.query(
-        SearchLog.term,
-        SearchLog.origin,
-        func.count(SearchLog.id).label('searches')
-    ).filter(SearchLog.results_found == 0)\
-     .group_by(SearchLog.term, SearchLog.origin)\
-     .order_by(desc('searches')).limit(10).all()
-     
-    return [{"term": r[0] or "N/A", "origin": r[1], "searches": r[2]} for r in data]
+
+    days_map = {"today": 1, "7d": 7, "30d": 30, "90d": 90}
+    days = days_map.get(period, 30)
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Agregação principal: termos mais buscados sem resultado
+    agg = (
+        db.query(
+            SearchLog.term,
+            SearchLog.origin,
+            func.count(SearchLog.id).label('searches'),
+            func.max(SearchLog.created_at).label('last_searched_at'),
+            func.count(func.distinct(SearchLog.ip_hash)).label('unique_users'),
+        )
+        .filter(SearchLog.results_found == 0)
+        .filter(SearchLog.created_at >= since)
+        .group_by(SearchLog.term, SearchLog.origin)
+        .order_by(desc('searches'))
+        .limit(limit)
+        .all()
+    )
+
+    # Para cada termo, busca a última ocorrência detalhada (device, source, geo)
+    results = []
+    for r in agg:
+        latest = (
+            db.query(SearchLog)
+            .filter(
+                SearchLog.term == r.term,
+                SearchLog.origin == r.origin,
+                SearchLog.results_found == 0,
+            )
+            .order_by(desc(SearchLog.created_at))
+            .first()
+        )
+        results.append({
+            "term": r.term or "N/A",
+            "origin": r.origin,
+            "searches": int(r.searches),
+            "unique_users": int(r.unique_users or 0),
+            "last_searched_at": r.last_searched_at.isoformat() if r.last_searched_at else None,
+            "last_device": latest.device if latest else None,
+            "last_browser": latest.browser if latest else None,
+            "last_os": latest.os if latest else None,
+            "last_source": latest.source_category if latest else None,
+            "last_referrer": latest.referrer if latest else None,
+            "last_city": latest.city if latest else None,
+            "last_state": latest.state if latest else None,
+            "last_ip": latest.ip_address if latest else None,
+            "last_vehicle_context": latest.vehicle_context if latest else None,
+        })
+
+    return results

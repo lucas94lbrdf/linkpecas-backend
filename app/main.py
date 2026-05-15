@@ -4,6 +4,9 @@
 # FastAPI
 # ==========================================================
 import os
+from dotenv import load_dotenv
+load_dotenv()  # Carrega .env ANTES de qualquer coisa
+
 import json
 from fastapi import FastAPI, Response, Depends, Request
 from pydantic import BaseModel
@@ -84,19 +87,6 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 # Monitoramento do Prometheus
 Instrumentator().instrument(app).expose(app)
 
-# Middlewares de Segurança
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=[
-        "linkpecas.online",
-        "www.linkpecas.online",
-        "api.linkpecas.online",
-        "localhost",
-        "127.0.0.1",
-        "api",
-    ],
-)
-
 # Configuração de CORS
 cors_origins = [
     "https://linkpecas.online",
@@ -108,12 +98,26 @@ if os.getenv("APP_ENV") == "development":
     cors_origins.append("http://localhost:5173")
     cors_origins.append("http://localhost:3000")
 
+# CORS deve ser adicionado ANTES dos outros middlewares
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Middlewares de Segurança
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        "linkpecas.online",
+        "www.linkpecas.online",
+        "api.linkpecas.online",
+        "localhost",
+        "127.0.0.1",
+        "api",
+    ],
 )
 
 # Rotas da API
